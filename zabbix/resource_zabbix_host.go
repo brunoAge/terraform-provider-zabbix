@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/claranet/go-zabbix-api"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
@@ -102,6 +103,12 @@ func resourceZabbixHost() *schema.Resource {
 				Type:     schema.TypeSet,
 				Elem:     &schema.Schema{Type: schema.TypeString},
 				Optional: true,
+			},
+			"macro": &schema.Schema{
+				Type:        schema.TypeMap,
+				Elem:        &schema.Schema{Type: schema.TypeString},
+				Optional:    true,
+				Description: "User macros for the host.",
 			},
 		},
 	}
@@ -269,9 +276,10 @@ func getTemplates(d *schema.ResourceData, api *zabbix.API) (zabbix.TemplateIDs, 
 
 func createHostObj(d *schema.ResourceData, api *zabbix.API) (*zabbix.Host, error) {
 	host := zabbix.Host{
-		Host:   d.Get("host").(string),
-		Name:   d.Get("name").(string),
-		Status: 0,
+		Host:       d.Get("host").(string),
+		Name:       d.Get("name").(string),
+		Status:     0,
+		UserMacros: createZabbixMacro(d),
 	}
 
 	//0 is monitored, 1 - unmonitored host
@@ -302,6 +310,11 @@ func createHostObj(d *schema.ResourceData, api *zabbix.API) (*zabbix.Host, error
 	}
 
 	host.TemplateIDs = templates
+	
+	if host.UserMacros == nil {
+		host.UserMacros = zabbix.Macros{}
+	}
+	
 	return &host, nil
 }
 
@@ -353,6 +366,7 @@ func resourceZabbixHostRead(d *schema.ResourceData, meta interface{}) error {
 		"hostids": []string{
 			d.Id(),
 		},
+		"selectMacros": "extend",
 	}
 
 	templates, err := api.TemplatesGet(params)
@@ -382,6 +396,12 @@ func resourceZabbixHostRead(d *schema.ResourceData, meta interface{}) error {
 	}
 
 	d.Set("groups", groupNames)
+	
+	terraformMacros, err := createTerraformMacroOnHost(*host)
+	if err != nil {
+		return err
+	}
+	d.Set("macro", terraformMacros)
 
 	return nil
 }
@@ -418,4 +438,24 @@ func resourceZabbixHostDelete(d *schema.ResourceData, meta interface{}) error {
 	api := meta.(*zabbix.API)
 
 	return api.HostsDeleteByIds([]string{d.Id()})
+}
+
+func createTerraformMacroOnHost(host zabbix.Host) (map[string]interface{}, error) {
+	terraformMacros := make(map[string]interface{}, len(host.UserMacros))
+
+	for _, macro := range host.UserMacros {
+		var name string
+		if noPrefix := strings.Split(macro.MacroName, "{$"); len(noPrefix) == 2 {
+			name = noPrefix[1]
+		} else {
+			return nil, fmt.Errorf("Invalid macro name \"%s\"", macro.MacroName)
+		}
+		if noSuffix := strings.Split(name, "}"); len(noSuffix) == 2 {
+			name = noSuffix[0]
+		} else {
+			return nil, fmt.Errorf("Invalid macro name \"%s\"", macro.MacroName)
+		}
+		terraformMacros[name] = macro.Value
+	}
+	return terraformMacros, nil
 }
